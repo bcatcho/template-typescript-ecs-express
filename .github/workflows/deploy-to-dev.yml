@@ -1,0 +1,82 @@
+# Deploy to dev ECS when a container is built
+name: Deploy to DEV 🚧
+
+# CUSTOMIZE THESE FOR YOUR REPOSITORY
+env:
+  aws-region: us-east-1
+  image: IMAGE_NAME
+  task-definition: TASK_DEFINITION_FILE
+  cluster: ECS_CLUSTER
+  service: ECS_SERVICE
+  container-name: CONTAINER_NAME
+  ecr-repository: ECR_REPOSITORY
+
+# Run when commits are pushed to the release branch or manually
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      build-new-container:
+        description: 'build new container'
+        required: false
+        default: false
+        type: boolean
+
+concurrency: deploy_dev
+
+jobs:
+  # Setup environment variables for future steps
+  setup:
+    name: 'Setup'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ env.image }}
+      task-definition: ${{ env.task-definition }}
+      cluster: ${{ env.cluster }}
+      service: ${{ env.service }}
+      container-name: ${{ env.container-name}}
+      ecr-repository: ${{ env.ecr-repository}}
+      aws-region: ${{ env.aws-region }}
+    steps:
+      - name: Debug Info
+        run: |
+          cat << EOF
+          ${{ toJSON(github) }}'
+          EOF
+  
+  # Build a new container if this was run automatically or if requested
+  build:
+    # wait for setup to finish
+    needs: setup
+    if: ${{ github.event_name == 'push' || github.event.inputs.build-new-container == 'true' }}
+    # Don't run if the workflow_run event failed
+    name: "Deploy to ECS"
+    uses: ./.github/workflows/util-build-container.yml
+    with:
+      repository:  ${{ needs.setup.outputs.ecr-repository }}
+      aws-region: ${{ needs.setup.outputs.aws-region }}
+    secrets:
+      aws_access_key_id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
+      aws_secret_access_key_id: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
+
+  # Deploy container to stage
+  deploy:
+    name: "Deploy to ECS"
+    # wait for setup and build to finish
+    needs: [ setup, build ]
+    # always run if the setup succeeded
+    if: ${{ always() && needs.setup.result == 'success' }}
+    uses: ./.github/workflows/util-deploy-ecs-container.yml
+    with:
+      container-name: ${{ needs.setup.outputs.container-name }}
+      image: "${{ needs.setup.output.image }}:${{ github.sha }}"
+      task-definition: ${{ needs.setup.outputs.task-definition}}
+      cluster: ${{ needs.setup.outputs.cluster }}
+      service: ${{ needs.setup.outputs.service }}
+      aws-region: ${{ needs.setup.outputs.aws-region }}
+      environment: development
+    secrets:
+      aws_access_key_id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
+      aws_secret_access_key_id: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}

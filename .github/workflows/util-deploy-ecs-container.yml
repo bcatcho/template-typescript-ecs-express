@@ -1,0 +1,82 @@
+# This workflow deploys a container to a desired ECS cluster and service
+name: 'util : Deploy to ECS'
+
+on:
+  workflow_call:
+    inputs:
+      container-name:
+        description: Container name once deployed
+        required: true
+        type: string
+      image:
+        description: Image name and tag
+        required: true
+        type: string
+      task-definition:
+        description: The task definition to deploy
+        required: true
+        type: string
+      cluster:
+        required: true
+        type: string
+      service:
+        required: true
+        type: string
+      aws-region:
+        default: us-east-1
+        type: string
+        required: false
+      environment:
+        type: string
+        required: true
+    secrets:
+      aws_access_key_id:
+        required: true
+      aws_secret_access_key_id:
+        required: true
+      
+jobs:
+  # output details about this run
+  info:
+    continue-on-error: true
+    name: Info
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat << EOF
+          ${{ toJSON(github) }}'
+          EOF
+  
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+        with:
+          aws-access-key-id: ${{ secrets.aws_access_key_id }}
+          aws-secret-access-key: ${{ secrets.aws_secret_access_key_id }}
+          aws-region: ${{ inputs.aws-region }}
+      
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ inputs.task-definition }}
+          container-name: ${{ inputs.container-name }}
+          # the registry is always in dev
+          image: "606636029421.dkr.ecr.us-east-1.amazonaws.com/${{ inputs.image }}"
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ inputs.service }}
+          cluster: ${{ inputs.cluster }}
+          wait-for-service-stability: true

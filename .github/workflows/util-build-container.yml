@@ -1,0 +1,68 @@
+# This workflow will build and push a new container image to Amazon ECR
+name: 'util : Build Container'
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: 'The ECR repo name'
+        type: string
+        required: true
+      aws-region:
+        description: The AWS region of the ECR repository
+        type: string
+        default: 'us-east-1'
+        required: false
+    secrets:
+      aws_access_key_id:
+        required: true
+      aws_secret_access_key_id:
+        required: true
+
+
+jobs:
+  build-and-push:
+    name: Build and Push Container
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the current branch
+      - name: Checkout ref
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Configure aws creds
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.aws_access_key_id }}
+          aws-secret-access-key: ${{ secrets.aws_secret_access_key_id }}
+          aws-region: ${{ inputs.aws-region }}
+      
+      # Login to ECR to get registry info for build step
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      
+      # Build tag and push. Tag release branches with a release tag
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.repository }}
+          IMAGE_TAG: ${{ github.sha }}
+          BRANCH_NAME: ${{ github.ref }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "Pushed Image: \`$ECR_REGISTRY/$ECR_REPOSITORY\`" >> $GITHUB_STEP_SUMMARY
+          echo "Tags:" >> $GITHUB_STEP_SUMMARY
+          echo "* \`$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
+
+          # if we are on a release branch update the release docker tag
+          version=$(echo "$BRANCH_NAME" | sed -nr 's/.*releases\/(v.*)/\1/p')
+          if [[ "$version" ]]; then
+            docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:$version
+            docker push $ECR_REGISTRY/$ECR_REPOSITORY:$version
+            echo "* \`$version\`" >> $GITHUB_STEP_SUMMARY
+          fi

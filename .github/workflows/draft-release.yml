@@ -1,0 +1,121 @@
+# Deploy to dev ECS when a container is built
+name: Draft release to STAGE 📐
+
+# CUSTOMIZE THESE FOR YOUR REPOSITORY
+env:
+  aws-region: us-east-1
+  image: IMAGE_NAME
+  task-definition: TASK_DEFINITION_FILE
+  cluster: ECS_CLUSTER
+  service: ECS_SERVICE
+  container-name: CONTAINER_NAME
+  ecr-repository: ECR_REPOSITORY
+
+# Run this workflow manually
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Sem version for release'
+        default: 'v1.0.0'
+        required: true
+
+concurrency: deploy_to_stage
+
+jobs:
+  # output details about this run
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ env.image }}
+      task-definition: ${{ env.task-definition }}
+      cluster: ${{ env.cluster }}
+      service: ${{ env.service }}
+      container-name: ${{ env.container-name}}
+      ecr-repository: ${{ env.ecr-repository}}
+      aws-region: ${{ env.aws-region }}
+    steps:
+      - run: |
+          cat << EOF
+          ${{ toJSON(github) }}'
+          EOF
+      
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      # ensure version tag doesn't exist
+      - name: Ensure version tag isn't taken
+        id: ensure-tag-is-unique
+        run: |
+          if [[ $(git ls-remote --tags origin | grep -e "${{ github.event.inputs.release-tag }}$") ]]; then 
+            echo "Version tag [${{ github.event.inputs.release-tag }}] already exists! Please use a new version."
+            exit 1
+          fi
+  
+  draft-release:
+    name: Draft release and create release branch
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      # tag docker image with version number
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.aws-region }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Tag with version number
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+          VERSION_TAG: ${{ github.event.inputs.release-tag }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION_TAG
+          echo "Tagging Image: \`$ECR_REGISTRY/$ECR_REPOSITORY\`" >> $GITHUB_STEP_SUMMARY
+          echo "Tags:" >> $GITHUB_STEP_SUMMARY
+          echo "* \`$IMAGE_TAG\` (existing tag)" >> $GITHUB_STEP_SUMMARY
+          echo "* \`$VERSION_TAG\`" >> $GITHUB_STEP_SUMMARY
+      
+      # create branch and release
+      - uses: peterjgrainger/action-create-branch@v2.1.0
+        env:
+          # use a special Persona Access Token that allows for updating repositories with workflow files
+          # This is only really needed if the branch we are creating is not on the head of a branch
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        with:
+          branch: "releases/${{ github.event.inputs.release-tag }}"
+          sha: ${{ github.sha }}
+      
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          name: "Release ${{ github.event.inputs.release-tag }}"
+          tag_name: ${{ github.event.inputs.release-tag }}
+          target_commitish: "releases/${{ github.event.inputs.release-tag }}"
+          generate_release_notes: true
+  
+  # Deploy to stage on version tag push because it might get moved
+  deploy:
+    name: "Deploy to ECS"
+    needs: [setup, draft-release]
+    uses: ./.github/workflows/util-deploy-ecs-container.yml
+    with:
+      container-name: ${{ needs.setup.outputs.container-name }}
+      image: "${{ needs.setup.output.image }}:${{ github.sha }}"
+      task-definition: ${{ needs.setup.outputs.task-definition}}
+      cluster: ${{ needs.setup.outputs.cluster }}
+      service: ${{ needs.setup.outputs.service }}
+      aws-region: ${{ needs.setup.outputs.aws-region }}
+      environment: stage
+    secrets:
+      aws_access_key_id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
+      aws_secret_access_key_id: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
